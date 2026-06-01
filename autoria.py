@@ -10,7 +10,7 @@ load_dotenv()
 
 
 class AutoRiaParser:
-    def __init__(self):
+    def __init__(self, brand_id=None, model_id=None, price_max=None, price_min=None, year_min=None, year_max=None):
         self.search_url = "https://auto.ria.com/uk/search/"
         self.params = {
             "search_type": "1",
@@ -18,8 +18,27 @@ class AutoRiaParser:
             "brand.id[0]": "9",
             "model.id[0]": "1866",
             "abroad": "0",
-            "customs_cleared": "1"
+            "customs_cleared": "1",
+            "indexName": "auto,order_auto,newauto_search",
+            "categories.main.id": "1",
+            "country.import.usa.not": "1",
+            "sort[0].order": "dates.created.desc",
+            "size": 30
         }
+
+        if brand_id:
+            self.params["brand.id[0]"] = brand_id
+        if model_id:
+            self.params["model.id[0]"] = model_id
+        if price_min:
+            self.params["price.ot"] = price_min
+        if price_max:
+            self.params["price.do"] = price_max
+        if year_min:
+            self.params["year.min"] = year_min
+        if year_max:
+            self.params["year.max"] = year_max
+
         self.headers = {
             "User-Agent": os.getenv("ARIA_USER_AGENT"),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -31,6 +50,7 @@ class AutoRiaParser:
             "nisess": os.getenv("ARIA_NISESS"),
             "ui": os.getenv("ARIA_UI")
         }
+
 
     def get_new_ads(self):
         try:
@@ -79,7 +99,7 @@ class AutoRiaParser:
 
 
 if __name__ == "__main__":
-    parser = AutoRiaParser()
+    parser = AutoRiaParser(brand_id="6", price_max="15000", year_min="2023")
     found_ads = parser.get_new_ads()
     print(f"Знайдено: {len(found_ads)} авто")
     for ad in found_ads[:5]:
