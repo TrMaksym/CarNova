@@ -1,46 +1,89 @@
 import re
-
 import telebot
 import os
 import urllib3
-from dotenv import load_dotenv
 import requests
+import sys
+import io
+from dotenv import load_dotenv
+
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 load_dotenv()
 
 bot = telebot.TeleBot(token=os.getenv("TG_BOT"))
 
-def get_id_from_ria(endpoint, text):
-    url = f"https://auto.ria.com/api/categories/1/{endpoint}/_search?text={text}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=5).json()
-        if response and len(response) > 0:
-            return response[0]["value"]
-    except:
-        pass
-    return None
+AUTO_CACHE = {}
 
-def get_brand_id(brand_name):
-    search_text = brand_name.capitalize()
 
-    url = f"https://auto.ria.com/api/categories/1/brands/_search?text={search_text}"
+def get_auto_id(endpoint, text, parent_id=None):
+    search_text = text.lower().strip()
+    url = "https://auto.ria.com/bff/search/public/form/api"
+    params = {"device": "desktop", "langId": "4"}
+
+    if parent_id:
+        payload = {
+            "name": "model",
+            "params": {
+                "category": 1,
+                "brand": int(parent_id),
+                "search_type": 1,
+                "text": search_text
+            }
+        }
+    else:
+        payload = {
+            "name": "brand",
+            "params": {
+                "category": 1,
+                "search_type": 1,
+                "text": search_text
+            }
+        }
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://auto.ria.com/uk/"
     }
+
     try:
-        response = requests.get(url, headers=headers, timeout=5).json()
-        if response and len(response) > 0:
-            return response[0]["value"], response[0]["name"]
+        response = requests.post(url, params=params, json=payload, headers=headers, timeout=10)
+        print(f"LOG: Пошук '{text}' | Статус: {response.status_code}")
+
+        if response.status_code == 200:
+            data = response.json()
+            group_data = data.get("brand") or data.get("model") or []
+
+            items = []
+            for group in group_data:
+                if isinstance(group, dict) and "items" in group:
+                    items.extend(group["items"])
+
+            if items:
+                target_item = next((i for i in items if i.get("name", "").lower() == search_text), None)
+
+                if not target_item:
+                    target_item = next((i for i in items if search_text in i.get("name", "").lower()), items[0])
+
+                if not target_item:
+                    target_item = items[0]
+
+                res_id = target_item.get("id") or target_item.get("value")
+                res_name = target_item.get("name")
+
+                print(f"LOG: Успішно розпізнано: {res_name} (ID: {res_id})")
+                return res_id, res_name
+
     except Exception as e:
-        print(f"Помилка запиту до API: {e}")
+        print(f"LOG: Помилка виконання: {e}")
 
     return None, None
-
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
@@ -63,13 +106,13 @@ def radar_command(message):
         parse_mode="HTML"
     )
 
+
 def send_telegram(message_text):
     chat_id = os.getenv("TG_CHAT_ID")
     if not chat_id:
-        print("❌ Помилка: CHAT_ID не знайдено в .env")
         return False
     try:
-        bot.send_message(chat_id, message_text, parse_mode="HTML", disable_web_page_preview=False)
+        bot.send_message(chat_id, message_text, parse_mode="HTML")
         return True
     except Exception as e:
         print(f"❌ Помилка відправки: {e}")
@@ -77,39 +120,53 @@ def send_telegram(message_text):
 
 
 @bot.message_handler(func=lambda message: True)
+def handle_text_message(message):
+    chat_id = message.chat.id
+    user_name = message.from_user.first_name
+    text = message.text.strip()
+
+    print(f"LOG: Користувач {user_name} (ID: {chat_id} написав: {text}")
+
+    bot.send_message(chat_id, f"Привіт, {user_name}! Шукаю для тебе: {text}")
+
+    with open("current_filter.txt", "r", encoding="utf-8") as f:
+        pass
+
+
+@bot.message_handler(func=lambda message: True)
 def handle_smart_search(message):
     original_text = message.text.strip()
     words = original_text.split()
-
     if not words:
         return
 
-    brand_id, brand_full_name = get_brand_id(words[0])
+    brand_query = words[0]
+    brand_id, brand_full_name = get_auto_id("brands", brand_query)
+
+    if not brand_id and len(words) > 1:
+        brand_query = f"{words[0]} {words[1]}"
+        brand_id, brand_full_name = get_auto_id("brands", brand_query)
+        if brand_id:
+            words.pop(0)
 
     if not brand_id:
-        brand_id, brand_full_name = get_brand_id(words[0].capitalize())
-
-    if not brand_id:
-        bot.reply_to(message, "❌ Не впізнав марку. Спробуй написати чіткіше (напр. Audi, BMW, Mercedes).")
+        bot.reply_to(message, "❌ Не впізнав марку. Спробуй написати чіткіше (напр. Audi, BMW).")
         return
 
-    model_id = ""
-    model_name = "Всі моделі"
+    model_id, model_name = "", "Всі моделі"
     if len(words) > 1:
-        model_url = f"https://auto.ria.com/api/categories/1/marks/{brand_id}/models/_search?text={words[1]}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        try:
-            m_res = requests.get(model_url, headers=headers, timeout=5).json()
-            if m_res:
-                model_id = m_res[0]['value']
-                model_name = m_res[0]['name']
+        potential_model = " ".join(words[1:])
+
+        clean_model_query = re.sub(r'\b(199\d|200\d|201\d|202\d)\b', "", potential_model).strip()
+
+        if clean_model_query:
+            m_id, m_name = get_auto_id("models", clean_model_query, brand_id)
+            if m_id:
+                model_id, model_name = m_id, m_name
             else:
-                model_name = words[1].upper()
-        except:
-            model_name = words[1].upper()
+                model_name = clean_model_query.upper()
 
     text_lower = original_text.lower()
-
     engine_match = re.search(r'(\d[\.,]\d)', text_lower)
     engine = engine_match.group(1).replace(',', '.') if engine_match else ""
 
@@ -117,18 +174,16 @@ def handle_smart_search(message):
     year = next((n for n in nums if 1990 <= int(n) <= 2026), "")
     price = next((n for n in nums if int(n) > 2026), "")
 
-    fuel = ""
-    fuel_label = ""
-    if "бенз" in text_lower:
-        fuel, fuel_label = "1", "Бензин"
-    elif "диз" in text_lower or "дт" in text_lower:
-        fuel, fuel_label = "2", "Дизель"
-    elif "газ" in text_lower:
-        fuel, fuel_label = "3", "Газ"
-    elif "електр" in text_lower:
-        fuel, fuel_label = "6", "Електро"
+    fuel_map = {"бенз": ("1", "Бензин"), "диз": ("2", "Дизель"), "дт": ("2", "Дизель"), "газ": ("3", "Газ"),
+                "електр": ("6", "Електро")}
+    fuel, fuel_label = "", ""
+    for k, v in fuel_map.items():
+        if k in text_lower:
+            fuel, fuel_label = v
+            break
 
     filter_data = f"{brand_id}|{model_id}|{year}|{price}|{fuel}|{engine}"
+
     with open("current_filter.txt", "w", encoding="utf-8") as f:
         f.write(filter_data)
 
@@ -137,7 +192,7 @@ def handle_smart_search(message):
         f"🚘 Марка: <b>{brand_full_name}</b>\n"
         f"📂 Модель: <b>{model_name}</b>\n"
     )
-    if engine: msg += f"⚙️ Мотор: <b>{engine}</b>\n"
+    if engine: msg += f"⚙️ Мотор: <b>{engine} л.</b>\n"
     if fuel_label: msg += f"⛽ Паливо: <b>{fuel_label}</b>\n"
     if year: msg += f"📅 Рік від: <b>{year}</b>\n"
     if price: msg += f"💰 Ціна до: <b>{price}$</b>\n"
@@ -145,10 +200,6 @@ def handle_smart_search(message):
     bot.reply_to(message, msg, parse_mode="HTML")
 
 
-
 if __name__ == "__main__":
-    print("🤖 Бот заступає на чергування...")
-
-    send_telegram("<b>CarNova Radar</b> успішно запущено в режимі прослуховування!")
-
+    print("Bot is starting...")
     bot.infinity_polling()
